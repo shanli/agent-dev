@@ -1,0 +1,27 @@
+[project]
+name = "llm-unified-service"
+version = "0.1.0"
+description = "LLM 统一模型调用服务（支持 OpenAI Responses / Anthropic Messages 双协议）"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "httpx>=0.27",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+    "sqlalchemy>=2.0",
+    "asyncpg>=0.30",
+    "alembic>=1.13",
+    "jsonschema>=4.23",
+    "structlog>=24.4",
+    "prometheus-client>=0.21",
+    "pyyaml>=6.0",
+    "python-multipart>=0.0.12",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

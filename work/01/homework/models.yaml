@@ -1,0 +1,27 @@
+# 模型注册表：逻辑模型 key → 配置
+# provider 决定使用哪个适配器，actual_model 是发给上游的真实模型标识
+models:
+  deepseek-v4-pro:
+    provider: openai_responses          # 使用 OpenAI Responses 协议适配器
+    actual_model: deepseek-v4-pro
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+    rpm: 60
+    tpm: 100000
+    # 每百万 token 单价（USD），用于写入时成本估算
+    price_per_million:
+      input: 0.27
+      output: 1.10
+      cached: 0.07
+
+  deepseek-v4-flash:
+    provider: anthropic_messages        # 使用 Anthropic Messages 协议适配器
+    actual_model: deepseek-v4-flash
+    base_url: https://api.deepseek.com/anthropic
+    api_key_env: DEEPSEEK_API_KEY
+    rpm: 300
+    tpm: 500000
+    price_per_million:
+      input: 0.07
+      output: 0.28
+      cached: 0.02
