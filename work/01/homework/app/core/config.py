@@ -27,6 +27,7 @@ class ModelConfig(BaseModel):
     rpm: int
     tpm: int
     price_per_million: PricePerMillion
+    candidates: list[str] = []  # 候选模型 key 列表，fallback 时按顺序切换
 
 
 class Settings(BaseSettings):

@@ -4,12 +4,12 @@
 1. Prompt 解析与渲染
 2. 按模型限流（超限 429）
 3. 指数退避重试（max_retries=2，共 3 次尝试）
-4. 适配器路由
+4. 适配器路由 + 候选池 fallback（本地限流/上游 429 时切换候选模型）
 5. 结构化输出校验 + 修复
 6. 全链路可观测（token/延时/成本/错误）
 
-流式关键约束：首 token 之前（WAITING）可安全重试；
-首 token 之后（STREAMING）任何错误只发 error chunk，不静默重试。
+流式关键约束：首 token 之前（WAITING）可安全重试 + fallback；
+首 token 之后（STREAMING）任何错误只发 error chunk，不静默重试、不切换模型。
 """
 
 from __future__ import annotations
@@ -56,24 +56,66 @@ class LLMGateway:
 
         try:
             messages = await self._resolve_messages(req, rec)
-            norm = self._normalize(req, messages)
             est_tokens = self._estimate_tokens(messages, req.max_tokens)
-            rec.provider = self._registry.get_config(req.model).provider
 
-            async def call(attempt: int) -> UnifiedResponse:
-                rec.attempt = attempt
-                t0 = time.perf_counter()
-                await self._limiter.acquire(req.model, est_tokens)
-                rec.queue_ms = int((time.perf_counter() - t0) * 1000)
-                result = await self._invoke_adapter(req, norm)
-                return self._to_response(result, rec, attempt)
+            # 构建模型链：主模型 + 候选池（去重、过滤未注册）
+            model_chain = self._build_model_chain(req.model)
 
-            resp = await with_retry(call, deadline=deadline, loop_time=loop.time)
+            last_error: Optional[LLMError] = None
+            succeeded_model: Optional[str] = None
+            norm: Optional[NormalizedRequest] = None
 
-            # 结构化输出校验 + 1 次修复（独立预算）
+            for idx, model in enumerate(model_chain):
+                if idx > 0:
+                    rec.fallback_from = model_chain[idx - 1]
+                rec.logical_model = model
+                rec.provider = self._registry.get_config(model).provider
+                norm = self._normalize(model, req, messages)
+
+                # 用默认参数捕获当前迭代的 model/norm，避免闭包延迟绑定
+                async def call(
+                    attempt: int,
+                    _model: str = model,
+                    _norm: NormalizedRequest = norm,
+                ) -> UnifiedResponse:
+                    rec.attempt = attempt
+                    t0 = time.perf_counter()
+                    await self._limiter.acquire(_model, est_tokens)
+                    rec.queue_ms = int((time.perf_counter() - t0) * 1000)
+                    result = await self._invoke_adapter(_model, _norm, req.timeout_ms)
+                    return self._to_response(result, rec, attempt)
+
+                try:
+                    resp = await with_retry(call, deadline=deadline, loop_time=loop.time)
+                    succeeded_model = model
+                    break
+                except LLMError as e:
+                    last_error = e
+                    # 不允许 fallback 或已是最后一个候选 → 上抛
+                    if not e.fallback_allowed or idx == len(model_chain) - 1:
+                        raise
+
+            # 理论上不会到这里（循环内要么 break 要么 raise）
+            if succeeded_model is None or norm is None:
+                raise last_error or LLMError(
+                    LLMErrorCode.UNKNOWN, "无可用模型", stage=LLMStage.ROUTING
+                )
+
+            # 结构化输出校验 + 1 次修复（独立预算）；修复复用实际命中的模型
             if req.response_schema:
+                serving_model = succeeded_model
+
+                async def repair_invoke(
+                    n: NormalizedRequest, r: UnifiedRequest, rc: CallRecord, attempt: int
+                ) -> UnifiedResponse:
+                    await self._limiter.acquire(
+                        serving_model, self._estimate_tokens(n.messages, r.max_tokens)
+                    )
+                    result = await self._invoke_adapter(serving_model, n, r.timeout_ms)
+                    return self._to_response(result, rc, attempt)
+
                 resp = await self._validator.validate_and_repair(
-                    resp, req, norm, rec, self._invoke_for_repair
+                    resp, req, norm, rec, repair_invoke
                 )
 
             await self._telemetry.finalize(rec, resp)
@@ -90,25 +132,51 @@ class LLMGateway:
 
         try:
             messages = await self._resolve_messages(req, rec)
-            norm = self._normalize(req, messages)
             est_tokens = self._estimate_tokens(messages, req.max_tokens)
-            rec.provider = self._registry.get_config(req.model).provider
+
+            model_chain = self._build_model_chain(req.model)
             timeout = httpx.Timeout(req.timeout_ms / 1000)
 
-            async def open_stream(attempt: int):
-                rec.attempt = attempt
-                await self._limiter.acquire(req.model, est_tokens)
-                adapter = self._registry.resolve(req.model)
-                gen = adapter.chat_stream(norm, timeout)
-                # 实际取首 chunk：确认连接成功 + 上游无错误（首 token 前可安全重试）
-                first = await gen.__anext__()
-                return first, gen
+            last_error: Optional[LLMError] = None
+            first_chunk = None
+            adapter_iter = None
 
-            # 仅 WAITING 期（首 chunk 之前）可重试，含认证失败/网络错误/上游 429
-            first_chunk, adapter_iter = await with_retry(open_stream, deadline=deadline, loop_time=loop.time)
+            for idx, model in enumerate(model_chain):
+                if idx > 0:
+                    rec.fallback_from = model_chain[idx - 1]
+                rec.logical_model = model
+                rec.provider = self._registry.get_config(model).provider
+                norm = self._normalize(model, req, messages)
 
-            # 首 chunk 成功 → 进入 STREAMING，后续不再重试
-            state = "STREAMING"
+                async def open_stream(
+                    attempt: int,
+                    _model: str = model,
+                    _norm: NormalizedRequest = norm,
+                ):
+                    rec.attempt = attempt
+                    await self._limiter.acquire(_model, est_tokens)
+                    adapter = self._registry.resolve(_model)
+                    gen = adapter.chat_stream(_norm, timeout)
+                    # 实际取首 chunk：确认连接成功 + 上游无错误（首 token 前可安全重试/fallback）
+                    first = await gen.__anext__()
+                    return first, gen
+
+                try:
+                    first_chunk, adapter_iter = await with_retry(
+                        open_stream, deadline=deadline, loop_time=loop.time
+                    )
+                    break
+                except LLMError as e:
+                    last_error = e
+                    if not e.fallback_allowed or idx == len(model_chain) - 1:
+                        raise
+
+            if first_chunk is None or adapter_iter is None:
+                raise last_error or LLMError(
+                    LLMErrorCode.UNKNOWN, "无可用模型", stage=LLMStage.ROUTING
+                )
+
+            # 首 chunk 成功 → 进入 STREAMING，后续不再重试、不切换模型
             buf = ""
             usage = Usage()
             finish_reason = "stop"
@@ -149,10 +217,8 @@ class LLMGateway:
                 rec.finish_reason = finish_reason
                 rec.final_state = "success"
                 rec.total_latency_ms = int((time.perf_counter() - rec.started_perf) * 1000)
-                if first_ts is not None:
-                    rec.generation_ms = rec.total_latency_ms - rec.ttft_ms - (rec.queue_ms or 0)
+                rec.generation_ms = rec.total_latency_ms - rec.ttft_ms - (rec.queue_ms or 0)
                 rec.is_final = True
-                # 成本估算（复用 telemetry 内部逻辑：直接计算并落库）
                 await self._finalize_stream(rec, usage)
             except LLMError as e:
                 # mid_stream：已有部分输出交付，禁止盲目重新生成，发 error chunk 收尾
@@ -174,6 +240,18 @@ class LLMGateway:
             raise
 
     # ── 内部方法 ──
+    def _build_model_chain(self, primary: str) -> list[str]:
+        """构建模型调用链：主模型 + 候选池，去重并过滤未注册模型。"""
+        chain: list[str] = [primary]
+        try:
+            cfg = self._registry.get_config(primary)
+        except LLMError:
+            return chain
+        for cand in cfg.candidates:
+            if cand not in chain and cand in self._registry._configs:
+                chain.append(cand)
+        return chain
+
     async def _resolve_messages(self, req: UnifiedRequest, rec: CallRecord) -> list[UnifiedMessage]:
         if req.prompt_ref:
             return await self._prompt.resolve(req.prompt_ref, rec)
@@ -185,8 +263,8 @@ class LLMGateway:
             stage=LLMStage.VALIDATION,
         )
 
-    def _normalize(self, req: UnifiedRequest, messages: list[UnifiedMessage]) -> NormalizedRequest:
-        cfg = self._registry.get_config(req.model)
+    def _normalize(self, model: str, req: UnifiedRequest, messages: list[UnifiedMessage]) -> NormalizedRequest:
+        cfg = self._registry.get_config(model)
         return NormalizedRequest(
             actual_model=cfg.actual_model,
             messages=messages,
@@ -203,18 +281,12 @@ class LLMGateway:
                 total += 1 if ord(ch) > 127 else 0.25
         return int(total) + (max_tokens or 256)
 
-    async def _invoke_adapter(self, req: UnifiedRequest, norm: NormalizedRequest) -> AdapterResult:
-        adapter = self._registry.resolve(req.model)
-        timeout = httpx.Timeout(req.timeout_ms / 1000)
+    async def _invoke_adapter(
+        self, model: str, norm: NormalizedRequest, timeout_ms: int
+    ) -> AdapterResult:
+        adapter = self._registry.resolve(model)
+        timeout = httpx.Timeout(timeout_ms / 1000)
         return await adapter.chat(norm, timeout)
-
-    async def _invoke_for_repair(
-        self, norm: NormalizedRequest, req: UnifiedRequest, rec: CallRecord, attempt: int
-    ) -> UnifiedResponse:
-        """供结构化修复复用的调用封装：限流 + 适配器调用 + 响应归一。"""
-        await self._limiter.acquire(req.model, self._estimate_tokens(norm.messages, req.max_tokens))
-        result = await self._invoke_adapter(req, norm)
-        return self._to_response(result, rec, attempt)
 
     def _to_response(self, result: AdapterResult, rec: CallRecord, attempt: int) -> UnifiedResponse:
         total_latency_ms = int((time.perf_counter() - rec.started_perf) * 1000)
@@ -234,15 +306,13 @@ class LLMGateway:
 
     async def _finalize_stream(self, rec: CallRecord, usage: Usage) -> None:
         """流式成功收尾：直接复用 telemetry 的持久化与指标。"""
-        # 计算成本
-        cfg = self._registry.get_config(rec.logical_model) if hasattr(self._registry, "get_config") else None
-        if cfg:
-            price = cfg.price_per_million
-            from decimal import Decimal
+        cfg = self._registry.get_config(rec.logical_model)
+        price = cfg.price_per_million
+        from decimal import Decimal
 
-            rec.cost_input = Decimal(rec.input_tokens) / Decimal(1_000_000) * Decimal(price.input)
-            rec.cost_output = Decimal(rec.output_tokens) / Decimal(1_000_000) * Decimal(price.output)
-            rec.cost_cached = Decimal(rec.cached_tokens) / Decimal(1_000_000) * Decimal(price.cached)
-            rec.cost_total = (rec.cost_input or 0) + (rec.cost_output or 0) + (rec.cost_cached or 0)
+        rec.cost_input = Decimal(rec.input_tokens) / Decimal(1_000_000) * Decimal(price.input)
+        rec.cost_output = Decimal(rec.output_tokens) / Decimal(1_000_000) * Decimal(price.output)
+        rec.cost_cached = Decimal(rec.cached_tokens) / Decimal(1_000_000) * Decimal(price.cached)
+        rec.cost_total = (rec.cost_input or 0) + (rec.cost_output or 0) + (rec.cost_cached or 0)
         await self._telemetry._persist(rec)
         self._telemetry._emit_metrics(rec, status="success")

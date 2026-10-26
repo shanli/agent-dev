@@ -35,6 +35,7 @@ TEST_MODELS: dict[str, ModelConfig] = {
         rpm=100000,
         tpm=10000000,
         price_per_million=PricePerMillion(input=0.27, output=1.10, cached=0.07),
+        candidates=["deepseek-v4-flash"],
     ),
     "deepseek-v4-flash": ModelConfig(
         key="deepseek-v4-flash",
@@ -45,6 +46,7 @@ TEST_MODELS: dict[str, ModelConfig] = {
         rpm=100000,
         tpm=10000000,
         price_per_million=PricePerMillion(input=0.07, output=0.28, cached=0.02),
+        candidates=["deepseek-v4-pro"],
     ),
 }
 

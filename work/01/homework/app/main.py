@@ -6,7 +6,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from app.adapters.registry import AdapterRegistry
@@ -92,6 +92,12 @@ async def llm_error_handler(request: Request, exc: LLMError):
     if exc.retry_after_ms:
         headers["Retry-After"] = str(max(1, round(exc.retry_after_ms / 1000)))
     return JSONResponse(status_code=status, content=body, headers=headers)
+
+
+@app.get("/", include_in_schema=False)
+async def root():
+    """根路径：引导到交互文档，避免访问 / 返回 404。"""
+    return RedirectResponse(url="/docs")
 
 
 @app.get("/health")

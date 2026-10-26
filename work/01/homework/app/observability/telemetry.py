@@ -134,7 +134,6 @@ class Telemetry:
         """成功收尾：填充结果字段，计算成本，落库 + 指标。"""
         elapsed = time.perf_counter() - rec.started_perf
         rec.actual_model = resp.actual_model
-        rec.usage = resp.usage  # type: ignore[attr-defined]
         rec.input_tokens = resp.usage.input_tokens
         rec.output_tokens = resp.usage.output_tokens
         rec.cached_tokens = resp.usage.cached_tokens

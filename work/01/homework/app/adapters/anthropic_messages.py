@@ -69,6 +69,13 @@ class AnthropicMessagesAdapter(LLMAdapter):
                 "/v1/messages", json=payload, headers=self._headers(), timeout=timeout
             )
             resp.raise_for_status()
+        except httpx.TimeoutException as e:
+            raise LLMError(
+                LLMErrorCode.UPSTREAM_TIMEOUT,
+                str(e),
+                stage=LLMStage.PRE_FIRST_TOKEN,
+                cause=e,
+            )
         except httpx.HTTPStatusError as e:
             raise self._map_http_error(e)
         except httpx.TransportError as e:
@@ -144,6 +151,13 @@ class AnthropicMessagesAdapter(LLMAdapter):
                                 "refusal": "content_filter",
                             }.get(stop_reason, "stop")
                             yield AdapterChunk(type="done", finish_reason=fr)
+        except httpx.TimeoutException as e:
+            raise LLMError(
+                LLMErrorCode.UPSTREAM_TIMEOUT,
+                str(e),
+                stage=LLMStage.PRE_FIRST_TOKEN,
+                cause=e,
+            )
         except httpx.TransportError as e:
             raise LLMError(
                 LLMErrorCode.NETWORK_ERROR,

@@ -13,6 +13,9 @@ models:
       input: 0.27
       output: 1.10
       cached: 0.07
+    # 本地限流/上游 429 时按顺序尝试的候选模型
+    candidates:
+      - deepseek-v4-flash
 
   deepseek-v4-flash:
     provider: anthropic_messages        # 使用 Anthropic Messages 协议适配器
@@ -25,3 +28,5 @@ models:
       input: 0.07
       output: 0.28
       cached: 0.02
+    candidates:
+      - deepseek-v4-pro

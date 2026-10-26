@@ -69,7 +69,8 @@ class StructuredValidator:
                     rec.validation_result = "failed"
                     raise
                 # 修复：把校验错误 + 原输出追加为新消息，让同模型重生成
-                repair_msgs = list(norm.messages)
+                # 先把已有消息统一转成 dict，避免 UnifiedMessage(**UnifiedMessage) 解包崩溃
+                repair_msgs = [m.model_dump() for m in norm.messages]
                 repair_msgs.append(
                     {
                         "role": "assistant",
