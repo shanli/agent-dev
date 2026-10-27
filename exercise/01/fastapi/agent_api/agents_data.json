@@ -1,0 +1,35 @@
+{
+  "counter": 3,
+  "agents": {
+    "agent-0001": {
+      "id": "agent-0001",
+      "name": "高级翻译助手",
+      "model": "gpt-4o",
+      "system_prompt": "你是一个有用的 AI 助手",
+      "temperature": 0.3,
+      "max_tokens": 2048,
+      "status": "idle",
+      "created_at": "2026-10-27T09:33:59.586963Z"
+    },
+    "agent-0002": {
+      "id": "agent-0002",
+      "name": "代码审查员",
+      "model": "claude-3-5",
+      "system_prompt": "你是一个有用的 AI 助手",
+      "temperature": 0.7,
+      "max_tokens": 2048,
+      "status": "running",
+      "created_at": "2026-10-27T09:34:03.342013Z"
+    },
+    "agent-0003": {
+      "id": "agent-0003",
+      "name": "数据分析师",
+      "model": "gpt-4o-mini",
+      "system_prompt": "你是一个有用的 AI 助手",
+      "temperature": 0.7,
+      "max_tokens": 2048,
+      "status": "idle",
+      "created_at": "2026-10-27T09:38:46.743225Z"
+    }
+  }
+}
